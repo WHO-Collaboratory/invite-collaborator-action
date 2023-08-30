@@ -1,15 +1,19 @@
 const core = require("@actions/core");
 const github = require("@actions/github");
-const { Octokit } = require("octokit");
-const { createAppAuth } = require("@octokit/auth-app");
+const { App } = require("octokit");
 
-async function checkCollaborators(octokit, thisOwner, thisRepo, thisUsername) {
+const TARGET_OWNER = process.env.TARGET_OWNER;
+const TARGET_REPO = process.env.TARGET_REPO;
+
+const USERNAME_REGEX = /(?<=@)[a-z0-9-]+/i;
+
+async function checkCollaborators(octokit, username) {
   let returnVal = "not a collaborator";
   try {
     const response = await octokit.rest.repos.checkCollaborator({
-      owner: thisOwner,
-      repo: thisRepo,
-      username: thisUsername,
+      owner: TARGET_OWNER,
+      repo: TARGET_REPO,
+      username,
     });
     if (response) {
       console.log("it is a response");
@@ -24,6 +28,7 @@ async function checkCollaborators(octokit, thisOwner, thisRepo, thisUsername) {
   }
   return returnVal;
 }
+
 // Utility function to wait for a specified duration (in seconds)
 function waitForRateLimitReset(durationInSeconds) {
   return new Promise((resolve) => {
@@ -33,13 +38,12 @@ function waitForRateLimitReset(durationInSeconds) {
   });
 }
 
-
-async function addCollaborator(octokit, thisOwner, thisRepo, thisUsername) {
+async function addCollaborator(octokit, username) {
   try {
     await octokit.rest.repos.addCollaborator({
-      owner: thisOwner,
-      repo: thisRepo,
-      username: thisUsername,
+      owner: TARGET_OWNER,
+      repo: TARGET_REPO,
+      username,
       permission: 'read'
     });
   } catch (error) {
@@ -51,171 +55,71 @@ async function addCollaborator(octokit, thisOwner, thisRepo, thisUsername) {
       console.log(`Rate limit exceeded. Waiting for ${waitTimeInSeconds} seconds before retrying.`);
       await waitForRateLimitReset(waitTimeInSeconds);
       // Retry the request after waiting
-      return addCollaborator(octokit, thisOwner, thisRepo, thisUsername);
+      return addCollaborator(octokit, username);
     } else {
-      console.log(
-        "ERROR: " +
-        error.message +
-        " occurred at " +
-        error.fileName +
-        ":" +
-        error.lineNumber
-      );
+      console.log(`ERROR: ${error.message} occurred at ${error.fileName}: ${error.lineNumber}`);
     }
   }
 }
 
-async function addComment(
-  octokit,
-  thisOwner,
-  thisRepo,
-  thisIssueNumber,
-  comment
-) {
-  try {
-    await octokit.rest.issues.createComment({
-      owner: thisOwner,
-      repo: thisRepo,
-      issue_number: thisIssueNumber,
-      body: comment,
-    });
-  } catch (error) {
-    console.log(
-      "ERROR: " +
-      error.message +
-      " occurred at " +
-      error.fileName +
-      ":" +
-      error.lineNumber
-    );
-  }
+async function addComment(octokit, owner, repo, issueNumber, comment) {
+  await octokit.rest.issues.createComment({owner, repo, issue_number: issueNumber, body: comment});
 }
 
-async function closeIssue(octokit, thisOwner, thisRepo, thisIssueNumber) {
-  try {
-    await octokit.rest.issues.update({
-      owner: thisOwner,
-      repo: thisRepo,
-      issue_number: thisIssueNumber,
-      state: "closed",
-    });
-  } catch (error) {
-    console.log(
-      "ERROR: " +
-      error.message +
-      " occurred at " +
-      error.fileName +
-      ":" +
-      error.lineNumber
-    );
-  }
+async function closeIssue(octokit, owner, repo, issueNumber) {
+  await octokit.rest.issues.update({owner, repo, issue_number: issueNumber, state: "closed"});
 }
 
-async function addLabel(octokit, thisOwner, thisRepo, thisIssueNumber, label) {
-  try {
-    await octokit.rest.issues.addLabels({
-      owner: thisOwner,
-      repo: thisRepo,
-      issue_number: thisIssueNumber,
-      labels: [label],
-    });
-  } catch (error) {
-    console.log(
-      "ERROR: " +
-      error.message +
-      " occurred at " +
-      error.fileName +
-      ":" +
-      error.lineNumber
-    );
-  }
+async function addLabel(octokit, owner, repo, issueNumber, label) {
+  await octokit.rest.issues.addLabels({owner, repo, issue_number: issueNumber, labels: [label]});
 }
 
 async function run() {
   try {
     // create Octokit client
-    const octokit = new Octokit({
-      authStrategy: createAppAuth,
-      auth: {
-        appId: process.env.APP_ID,
-        privateKey: process.env.PRIVATE_KEY,
-        oauth: {
-          clientId: process.env.CLIENT_ID,
-          clientSecret: process.env.CLIENT_SECRET,
-        },
-        webhooks: {
-          secret: process.env.WEBHOOK_SECRET,
-        },
-        installationId: process.env.INSTALLATION_ID
-      },
+    const app = new App({
+      appId: process.env.APP_ID,
+      // https://github.com/octokit/auth-app.js/issues/465
+      privateKey: process.env.PRIVATE_KEY.replace(/\\n/g, '\n'),
     });
-    // if (!thisToken) {
-    //   console.log("ERROR: Token was not retrieved correctly and is falsy.");
-    //   core.setFailed("Error: token was not correctly interpreted");
-    //   console.log("was it received");
-    // }
-
-    // const octokit = new github.getOctokit(thisToken);
+    const octokit = await app.getInstallationOctokit(process.env.INSTALLATION_ID);
 
     // get comment
-    const issueTitle = github.context.payload.issue.title;
-    const regex = /(?<=@)[a-z0-9-]+/i;
-    const thisUsername = issueTitle.match(regex)[0];
-    const thisRepo = 'maintainers';
-    const thisOwner = 'community';
-    const thisIssueNumber = github.context.payload.issue.number;
+    const {title: issueTitle, number: issueNumber} = github.context.payload.issue;
     const workflowRepo = github.context.payload.repository.name;
     const workflowOwner = github.context.payload.repository.owner.login;
 
-    console.log(
-      "Parsed event values:\n\tRepo: " +
-      thisRepo +
-      "\n\tUsername of commenter: " +
-      thisUsername +
-      "\n\tRepo Owner: " +
-      thisOwner
-    );
+    const requesterUsername = issueTitle.match(USERNAME_REGEX)[0];
+
+    console.log(`Parsed event values:\n\tRepo: ${TARGET_REPO}\n\tUsername of commenter: ${requesterUsername}\n\tRepo Owner: ${TARGET_OWNER}`);
 
     // check to make sure commenter is not owner (gives big error energy)
-    if (thisUsername == thisOwner) {
+    if (requesterUsername == TARGET_OWNER) {
       console.log("Commenter is the owner of this repository; exiting.");
       process.exit(0);
     }
 
-    const isUserCollaborator = await checkCollaborators(
-      octokit,
-      thisOwner,
-      thisRepo,
-      thisUsername
-    );
+    const isUserCollaborator = await checkCollaborators(octokit, requesterUsername);
 
     if (isUserCollaborator.status == 404) {
-      await addCollaborator(octokit, thisOwner, thisRepo, thisUsername);
+      await addCollaborator(octokit, requesterUsername);
       // add comment to issue
-      const comment = `@${thisUsername} has been added as a member of this repository. Please check your email or notifications for an invitation.`;
+      const comment = `@${requesterUsername} has been added as a member of this repository. Please check your email or notifications for an invitation.`;
       const label = "collaborator added";
-      await addComment(octokit, workflowOwner, workflowRepo, thisIssueNumber, comment);
+      await addComment(octokit, workflowOwner, workflowRepo, issueNumber, comment);
       // add label to issue
-      await addLabel(octokit, workflowOwner, workflowRepo, thisIssueNumber, label);
+      await addLabel(octokit, workflowOwner, workflowRepo, issueNumber, label);
       // close issue
-      await closeIssue(octokit, workflowOwner, workflowRepo, thisIssueNumber);
+      await closeIssue(octokit, workflowOwner, workflowRepo, issueNumber);
     } else if (isUserCollaborator == "already collaborator") {
-      const comment = `@${thisUsername} is already a member of this repository.`;
+      const comment = `@${requesterUsername} is already a member of this repository.`;
       const label = "duplicate request";
-      await addComment(octokit, workflowOwner, workflowRepo, thisIssueNumber, comment);
+      await addComment(octokit, workflowOwner, workflowRepo, issueNumber, comment);
       // add label to issue
-      await addLabel(octokit, workflowOwner, workflowRepo, thisIssueNumber, label);
-      await closeIssue(octokit, workflowOwner, workflowRepo, thisIssueNumber);
+      await addLabel(octokit, workflowOwner, workflowRepo, issueNumber, label);
+      await closeIssue(octokit, workflowOwner, workflowRepo, issueNumber);
     }
   } catch (error) {
-    console.log(
-      "ERROR: " +
-      error.message +
-      " occurred at " +
-      error.fileName +
-      ":" +
-      error.lineNumber
-    );
     console.log("Full error: " + error);
     core.setFailed(error.message);
   }
